@@ -1,4 +1,4 @@
-// Copyright 2013, Fredrik Hultin.
+				// Copyright 2013, Fredrik Hultin.
 // Copyright 2013, Jakob Bornecrantz.
 // Copyright 2013, Joey Ferwerda.
 // SPDX-License-Identifier: BSL-1.0
@@ -14,6 +14,7 @@
 #define HTC_ID                   0x0bb4
 #define VIVE_HMD                 0x2c87
 #define VIVE_PRO_HMD             0x0309
+#define INDEX_HMD                0x2300
 
 #define VALVE_ID                 0x28de
 #define VIVE_WATCHMAN_DONGLE     0x2101
@@ -34,7 +35,8 @@
 
 typedef enum {
 	REV_VIVE,
-	REV_VIVE_PRO
+	REV_VIVE_PRO,
+	REV_INDEX
 } vive_revision;
 
 typedef struct {
@@ -42,6 +44,8 @@ typedef struct {
 
 	hid_device* hmd_handle;
 	hid_device* imu_handle;
+	hid_device* imu_handle2;
+	hid_device* imu_handle3;
 	fusion sensor_fusion;
 	vec3f raw_accel, raw_gyro;
 	uint32_t last_ticks;
@@ -58,22 +62,40 @@ typedef struct {
 
 static void vec3f_from_vive_vec_accel(const vive_imu_config* config,
                                       const int16_t* smp,
-                                      vec3f* out)
+                                      vec3f* out, bool xy_swap)
 {
 	float range = config->acc_range / 32768.0f;
-	out->x = range * config->acc_scale.x * (float) smp[0] - config->acc_bias.x;
-	out->y = range * config->acc_scale.y * (float) smp[1] - config->acc_bias.y;
-	out->z = range * config->acc_scale.z * (float) smp[2] - config->acc_bias.z;
+	if(!xy_swap)
+	{
+		out->x = range * config->acc_scale.x * (float) smp[0] - config->acc_bias.x;
+		out->y = range * config->acc_scale.y * (float) smp[1] - config->acc_bias.y;
+		out->z = range * config->acc_scale.z * (float) smp[2] - config->acc_bias.z;
+	}
+	else
+	{
+		out->x = range * config->acc_scale.x * (float) smp[1] - config->acc_bias.y;
+		out->y = range * config->acc_scale.y * (float) smp[0] - config->acc_bias.x;
+		out->z = range * config->acc_scale.z * (float) smp[2] - config->acc_bias.z;
+	}
 }
 
 static void vec3f_from_vive_vec_gyro(const vive_imu_config* config,
                                      const int16_t* smp,
-                                     vec3f* out)
+                                     vec3f* out, bool xy_swap)
 {
 	float range = config->gyro_range / 32768.0f;
-	out->x = range * config->gyro_scale.x * (float)smp[0] - config->gyro_bias.x;
-	out->y = range * config->gyro_scale.y * (float)smp[1] - config->gyro_bias.y;
-	out->z = range * config->gyro_scale.z * (float)smp[2] - config->gyro_bias.z;
+	if(!xy_swap)
+	{
+		out->x = range * config->gyro_scale.x * (float)smp[0] - config->gyro_bias.x;
+		out->y = range * config->gyro_scale.y * (float)smp[1] - config->gyro_bias.y;
+		out->z = range * config->gyro_scale.z * (float)smp[2] - config->gyro_bias.z;
+	}
+	else
+	{
+		out->x = range * config->gyro_scale.x * (float)smp[1] - config->gyro_bias.y;
+		out->y = range * config->gyro_scale.y * (float)smp[0] - config->gyro_bias.x;
+		out->z = range * config->gyro_scale.z * (float)smp[2] - config->gyro_bias.z;
+	}
 }
 
 static bool process_error(vive_priv* priv)
@@ -143,8 +165,12 @@ static void handle_imu_packet(vive_priv* priv, unsigned char *buffer, int size)
 
 		priv->last_ticks = smp->time_ticks;
 
-		vec3f_from_vive_vec_accel(&priv->imu_config, smp->acc, &priv->raw_accel);
-		vec3f_from_vive_vec_gyro(&priv->imu_config, smp->rot, &priv->raw_gyro);
+		bool xy_swap = false;
+		if ( priv->revision == REV_INDEX )
+			xy_swap = true;
+
+		vec3f_from_vive_vec_accel(&priv->imu_config, smp->acc, &priv->raw_accel, xy_swap);
+		vec3f_from_vive_vec_gyro(&priv->imu_config, smp->rot, &priv->raw_gyro, xy_swap);
 
 		// Fix imu orientation
 		switch (priv->revision) {
@@ -158,6 +184,14 @@ static void handle_imu_packet(vive_priv* priv, unsigned char *buffer, int size)
 				priv->raw_accel.x *= -1;
 				priv->raw_accel.z *= -1;
 				priv->raw_gyro.x *= -1;
+				priv->raw_gyro.z *= -1;
+				break;
+			case REV_INDEX:
+				priv->raw_accel.x *= -1;
+				priv->raw_accel.y *= -1;
+				priv->raw_accel.z *= -1;
+				priv->raw_gyro.x *= -1;
+				priv->raw_gyro.y *= -1;
 				priv->raw_gyro.z *= -1;
 				break;
 			default:
@@ -180,7 +214,7 @@ static void handle_imu_packet(vive_priv* priv, unsigned char *buffer, int size)
 static void update_device(ohmd_device* device)
 {
 	vive_priv* priv = (vive_priv*)device;
-
+	int hret = 0;
 	int size = 0;
 
 	unsigned char buffer[FEATURE_BUFFER_SIZE];
@@ -251,13 +285,20 @@ static void close_device(ohmd_device* device)
 			                               sizeof(vive_pro_magic_power_off));
 			LOGI("vive pro power off magic: %d\n", hret);
 			break;
+		case REV_INDEX:
+			hret = hid_send_feature_report(priv->hmd_handle,
+			                               index_magic_power_off,
+			                               sizeof(index_magic_power_off));
+			LOGI("Index power off magic: %d\n", hret);
+			break;
 		default:
 			LOGE("Unknown VIVE revision.\n");
 	}
-
-	hid_close(priv->hmd_handle);
+	
 	hid_close(priv->imu_handle);
-
+	hid_close(priv->imu_handle2);
+	//hid_close(priv->imu_handle3);
+	hid_close(priv->hmd_handle);
 	free(device);
 }
 
@@ -501,6 +542,9 @@ static ohmd_device* open_device(ohmd_driver* driver, ohmd_device_desc* desc)
 		case REV_VIVE_PRO:
 			priv->hmd_handle = open_device_idx(HTC_ID, VIVE_PRO_HMD, 0, 1, idx);
 			break;
+		case REV_INDEX:
+			priv->hmd_handle = open_device_idx(VALVE_ID, INDEX_HMD, 0, 1, 2);
+			break;
 		default:
 			LOGE("Unknown VIVE revision.\n");
 	}
@@ -520,6 +564,11 @@ static ohmd_device* open_device(ohmd_driver* driver, ohmd_device_desc* desc)
 			break;
 		case REV_VIVE_PRO:
 			priv->imu_handle = open_device_idx(VALVE_ID, VIVE_LHR, 0, 1, idx);
+			break;
+		case REV_INDEX:
+			priv->imu_handle = open_device_idx(VALVE_ID, VIVE_LHR, 0, 1, 0);
+			priv->imu_handle2 = open_device_idx(VALVE_ID, VIVE_LHR, 0, 1, 1);
+			//priv->imu_handle3 = open_device_idx(VALVE_ID, 0x2102, 0, 2, 1);
 			break;
 		default:
 			LOGE("Unknown VIVE revision.\n");
@@ -604,6 +653,19 @@ static ohmd_device* open_device(ohmd_driver* driver, ohmd_device_desc* desc)
 			                               sizeof(vive_pro_enable_imu));
 			LOGI("Enable Pro IMU magic: %d\n", hret);
 			break;
+		case REV_INDEX:
+			// turn the display on
+			hret = hid_send_feature_report(priv->hmd_handle,
+			                               index_magic_power_on,
+			                               sizeof(index_magic_power_on));
+			LOGI("power on magic: %d\n", hret);
+
+			// Enable Index IMU
+			//hret = hid_send_feature_report(priv->hmd_handle,
+			 //                              vive_pro_enable_imu,
+			  //                             sizeof(vive_pro_enable_imu));
+			//LOGI("Enable Pro IMU magic: %d\n", hret);
+			break;
 		default:
 			LOGE("Unknown VIVE revision.\n");
 	}
@@ -619,6 +681,11 @@ static ohmd_device* open_device(ohmd_driver* driver, ohmd_device_desc* desc)
 			priv->base.properties.ratio = (2160.0f / 1200.0f) / 2.0f;
 			break;
 		case REV_VIVE_PRO:
+			priv->base.properties.hres = 2880;
+			priv->base.properties.vres = 1600;
+			priv->base.properties.ratio = (2880.0f / 1600.0f) / 2.0f;
+			break;
+		case REV_INDEX:
 			priv->base.properties.hres = 2880;
 			priv->base.properties.vres = 1600;
 			priv->base.properties.ratio = (2880.0f / 1600.0f) / 2.0f;
@@ -673,8 +740,15 @@ static void get_device_list(ohmd_driver* driver, ohmd_device_list* list)
 		rev = REV_VIVE;
 	} else {
 		devs = hid_enumerate(HTC_ID, VIVE_PRO_HMD);
-		if (devs != NULL)
+		if (devs != NULL){
 			rev = REV_VIVE_PRO;
+		}
+		else{
+			devs = hid_enumerate(VALVE_ID, INDEX_HMD);
+			if (devs != NULL){
+				rev = REV_INDEX;
+			}
+		}
 	}
 
 	struct hid_device_info* cur_dev = devs;
