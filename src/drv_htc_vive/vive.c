@@ -740,12 +740,11 @@ static void get_device_list(ohmd_driver* driver, ohmd_device_list* list)
 		rev = REV_VIVE;
 	} else {
 		devs = hid_enumerate(HTC_ID, VIVE_PRO_HMD);
-		if (devs != NULL){
+		if (devs != NULL) {
 			rev = REV_VIVE_PRO;
-		}
-		else{
+		} else {
 			devs = hid_enumerate(VALVE_ID, INDEX_HMD);
-			if (devs != NULL){
+			if (devs != NULL) {
 				rev = REV_INDEX;
 			}
 		}
@@ -758,8 +757,8 @@ static void get_device_list(ohmd_driver* driver, ohmd_device_list* list)
 		ohmd_device_desc* desc = &list->devices[list->num_devices++];
 
 		strcpy(desc->driver, "OpenHMD HTC Vive Driver");
-		strcpy(desc->vendor, "HTC/Valve");
-		strcpy(desc->product, "HTC Vive");
+		strcpy(desc->vendor, cur_dev->manufacturer_string);
+		strcpy(desc->product, cur_dev->product_string);
 
 		desc->revision = rev;
 
