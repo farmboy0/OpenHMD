@@ -8,6 +8,7 @@ option(
 	],
 	value: [
 		'simple',
+		'opengl',
 	],
 )
 
